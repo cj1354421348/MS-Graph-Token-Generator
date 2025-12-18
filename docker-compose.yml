@@ -1,0 +1,38 @@
+version: '3.8'
+
+services:
+  token-generator:
+    build: .
+    container_name: msgraph-token-gen
+    restart: unless-stopped
+    ports:
+      - "5269:5000"
+    volumes:
+      # 【关键】映射账号文件，保证数据持久化
+      - ./accounts.json:/app/accounts.json
+      # 映射日志或其它文件 (如有需要)
+    env_file:
+      - .env
+    # 可以在这里覆盖环境变量
+    environment:
+      - HOST=0.0.0.0
+      - PORT=5000
+
+  # 后台自动刷新 + 同步任务 (每 7 天执行一次)
+  token-refresher:
+    build: .
+    container_name: msgraph-refresher
+    restart: unless-stopped
+    volumes:
+      - ./accounts.json:/app/accounts.json
+    env_file:
+      - .env
+    # 逻辑：先刷新 Token，紧接着同步到数据库，然后休眠 7 天 (604800秒)
+    command: >
+      sh -c "while true; do 
+        echo 'Starting auto-refresh loop...';
+        python token_refresher.py;
+        python sync_db.py;
+        echo 'All done. Sleeping for 7 days...';
+        sleep 604800; 
+      done"
