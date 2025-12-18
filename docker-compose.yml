@@ -1,8 +1,8 @@
-version: '3.8'
-
 services:
   token-generator:
-    build: .
+    # 远程部署使用 GitHub 构建好的镜像 (请替换为你的 GitHub 用户名和仓库名)
+    image: ghcr.io/your_github_username/ms-graph-token-generator:latest
+    # build: .  <-- 本地开发才用 build，远程部署如果没有上传源码，必须用 image
     container_name: msgraph-token-gen
     restart: unless-stopped
     ports:
@@ -20,7 +20,9 @@ services:
 
   # 后台自动刷新 + 同步任务 (每 7 天执行一次)
   token-refresher:
-    build: .
+    # 同上，使用同一个镜像
+    image: ghcr.io/your_github_username/ms-graph-token-generator:latest
+    # build: .
     container_name: msgraph-refresher
     restart: unless-stopped
     volumes:
