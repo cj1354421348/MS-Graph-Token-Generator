@@ -2,7 +2,67 @@ from flask import Flask, request, redirect, url_for, session, render_template_st
 import msal
 import os
 import uuid
+import json
+import datetime
 from dotenv import load_dotenv
+
+ACCOUNTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "accounts.json")
+
+def save_to_json(email, refresh_token, client_id):
+    """保存或更新账户信息到 JSON 文件"""
+    print(f"DEBUG: 尝试保存到 {ACCOUNTS_FILE}...")
+    print(f"DEBUG: 目标邮箱: {email}")
+    
+    data = {}
+    if os.path.exists(ACCOUNTS_FILE):
+        try:
+            with open(ACCOUNTS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            print(f"⚠️ 读取 {ACCOUNTS_FILE} 失败: {e}")
+
+    # 构造数据
+    now_str = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    
+    # 查找是否存在对应的 Key (忽略大小写)
+    target_key = email
+    for key in data.keys():
+        if key.lower() == email.lower():
+            target_key = key
+            print(f"DEBUG: 找到现有账户: {key} (匹配 {email})")
+            break
+            
+    if target_key not in data:
+        print(f"DEBUG: 创建新账户记录: {target_key}")
+        data[target_key] = {}
+        # 只有新建时才初始化这些
+        data[target_key]["tags"] = []
+        data[target_key]["status"] = "active"
+
+    # 更新字段
+    data[target_key]["refresh_token"] = refresh_token
+    data[target_key]["client_id"] = client_id
+    data[target_key]["last_modified_at"] = now_str
+    
+    # 显式设置为 active
+    data[target_key]["status"] = "active"
+    if "status_reason" in data[target_key]:
+        del data[target_key]["status_reason"]
+    if "status_updated_at" in data[target_key]:
+        del data[target_key]["status_updated_at"]
+    if "token_failures" in data[target_key]:
+        del data[target_key]["token_failures"]
+
+    try:
+        with open(ACCOUNTS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        print("DEBUG: 写入成功！")
+        return True, target_key
+    except Exception as e:
+        print(f"❌ 写入 {ACCOUNTS_FILE} 失败: {e}")
+        return False, str(e)
+
+
 
 # 加载 .env 文件中的环境变量
 load_dotenv()
@@ -136,52 +196,84 @@ def handle_callback():
         """, error=result.get("error"), desc=result.get("error_description"))
 
     # 4. 成功，提取信息
-    # MSAL 返回的 result 包含 access_token, id_token, refresh_token 等
     refresh_token = result.get("refresh_token")
+    # access_token = result.get("access_token") # UI 不需要显示太乱
     
-    if not refresh_token:
-        # 有时候如果没有 offline_access scope，可能不会返回 refresh_token
-        return "⚠️ 获取成功，但未返回 Refresh Token。请检查 Scope 中是否包含 offline_access。", 200
+    # 尝试提取用户邮箱
+    email = "unknown_user"
+    claims = result.get("id_token_claims", {})
+    if "preferred_username" in claims:
+        email = claims["preferred_username"]
+    elif "upn" in claims:
+        email = claims["upn"]
+    elif "email" in claims:
+        email = claims["email"]
+    
+    print(f"DEBUG: 解析到的邮箱: {email}")
+
+    # 自动保存
+    save_status = False
+    save_msg = ""
+    if refresh_token:
+        # save_to_json 返回 (success, info)
+        success, info = save_to_json(email, refresh_token, CLIENT_ID)
+        if success:
+            save_status = True
+            save_msg = f"✅ 已自动更新账户: {info}"
+        else:
+            save_msg = f"❌ 自动保存失败: {info}"
 
     return render_template_string("""
         <!DOCTYPE html>
         <html>
         <head>
-            <title>成功获取令牌</title>
+            <title>Microsoft Graph 授权成功</title>
             <style>
-                body { font-family: 'Segoe UI', sans-serif; padding: 40px; background-color: #f3f2f1; }
-                .container { max-width: 800px; margin: 0 auto; background: white; padding: 40px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
-                .token-box { word-wrap: break-word; background-color: #f8f9fa; padding: 20px; border: 1px solid #e1dfdd; border-radius: 4px; font-family: 'Consolas', monospace; margin: 20px 0; max-height: 300px; overflow-y: auto; color: #a4262c; }
-                h1 { color: #107c10; display: flex; align-items: center; gap: 10px; }
-                p { color: #605e5c; }
-                button { cursor: pointer; padding: 10px 20px; background-color: #0078D4; color: white; border: none; border-radius: 4px; font-size: 14px; }
-                button:hover { background-color: #005a9e; }
+                body { font-family: 'Segoe UI', sans-serif; text-align: center; padding-top: 50px; background-color: #f3f2f1; }
+                .container { max-width: 700px; margin: 0 auto; background: white; padding: 40px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+                h1 { color: #107c10; margin-bottom: 20px; }
+                .success-msg { color: #107c10; font-weight: 600; margin-bottom: 20px; padding: 10px; background-color: #dff6dd; border-radius: 4px; display: inline-block;}
+                .error-msg { color: #a80000; font-weight: 600; margin-bottom: 20px; padding: 10px; background-color: #fde7e9; border-radius: 4px; display: inline-block;}
+                .token-box { background: #f8f9fa; padding: 15px; border-radius: 4px; border: 1px solid #e1dfdd; font-family: monospace; font-size: 12px; word-break: break-all; max-height: 150px; overflow-y: auto; text-align: left; margin: 20px 0; color: #333; }
+                .btn { display: inline-block; padding: 10px 25px; background-color: #0078D4; color: white; text-decoration: none; border-radius: 4px; cursor: pointer; border: none; font-size: 14px; transition: background 0.2s; }
+                .btn:hover { background-color: #005a9e; }
+                .meta { color: #605e5c; font-size: 14px; margin-top: 5px; }
             </style>
-        </head>
-        <body>
-            <div class="container">
-                <h1>🎉 认证成功</h1>
-                <p>以下是您的 Refresh Token，请妥善保管：</p>
-                <div class="token-box">
-                    <code id="token-code">{{ token }}</code>
-                </div>
-                <button onclick="copyToken()">📋 一键复制令牌</button>
-                <p style="margin-top: 30px; font-size: 0.9em; color: #888;">注意: 此 Token 直接与您的 Client ID 绑定。</p>
-            </div>
-
             <script>
                 function copyToken() {
-                    var tokenText = document.getElementById("token-code").innerText;
-                    navigator.clipboard.writeText(tokenText).then(function() {
-                        alert("✅ 令牌已复制到剪贴板！");
+                    var copyText = document.getElementById("refreshToken");
+                    navigator.clipboard.writeText(copyText.innerText).then(function() {
+                        alert("Refresh Token 已复制！");
                     }, function(err) {
-                        alert("❌ 复制失败: " + err);
+                        alert("复制失败: " + err);
                     });
                 }
             </script>
+        </head>
+        <body>
+            <div class="container">
+                <h1>🎉 授权成功</h1>
+                
+                {% if save_status %}
+                    <div class="success-msg">{{ save_msg }}</div>
+                {% else %}
+                    <div class="error-msg">{{ save_msg }}</div>
+                {% endif %}
+
+                <p class="meta">Client ID: {{ client_id }}</p>
+                
+                <h3 style="text-align: left; margin-bottom: 5px; font-size: 16px;">Refresh Token (90天):</h3>
+                <div class="token-box" id="refreshToken">{{ refresh_token }}</div>
+                
+                <button class="btn" onclick="copyToken()">📋 复制 Token</button>
+
+                <div style="margin-top: 40px; border-top: 1px solid #eee; padding-top: 20px;">
+                    <a href="/" style="color: #666; text-decoration: none;">返回首页生成下一个</a>
+                </div>
+            </div>
         </body>
         </html>
-    """, token=refresh_token)
+    """, refresh_token=refresh_token, client_id=CLIENT_ID, save_status=save_status, save_msg=save_msg)
 
 
 # --- 5. 启动应用 ---
@@ -197,3 +289,4 @@ if __name__ == "__main__":
         print(f"ℹ️  公共模式 (Public/Desktop) - PKCE Enabled")
     
     app.run(host=host, port=port, debug=debug, use_reloader=False)
+

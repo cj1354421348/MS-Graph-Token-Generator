@@ -2,3 +2,4 @@ flask
 requests
 python-dotenv
 msal
+psycopg2-binary
