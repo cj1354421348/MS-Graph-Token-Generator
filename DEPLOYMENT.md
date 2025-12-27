@@ -43,11 +43,30 @@
 **当然可以部署到 Docker！** 原理是一样的。
 Docker 只是改变了运行环境，没有改变 OAuth 协议的规则（必须是 localhost）。
 
-**1. 启动 Docker 容器：**
+**1. 准备配置文件（关键！）**
+由于 Docker 挂载机制的特性，如果宿主机上文件不存在，Docker 会自动创建一个**文件夹**而不是文件，这会导致报错 `Are you trying to mount a directory onto a file?`。
+
+因此，**在启动之前**，请务必在服务器目录 (`/opt/1panel/...`) 执行以下命令：
 ```bash
-docker-compose up -d
+# 1. 创建空的 json 文件 (防止被识别为目录)
+echo "{}" > accounts.json
+
+# 2. 准备 .env 文件
+# 确保包含 NOTIFY_API_URL 等新变量
+cp .env.example .env
+vi .env
 ```
-这会在服务器上启动服务，并映射端口 `5000`。此时服务器依然是在监听 `0.0.0.0:5000`。
+
+**2. 启动 Docker 容器：**
+我们现在使用 Python 调度器管理服务：
+```bash
+docker-compose up -d --build
+```
+查看日志：
+```bash
+# -f 参数很重要，因为使用了 python -u，日志是实时的
+docker-compose logs -f
+```
 
 **2. 依然需要 "SSH 打洞"：**
 因为你不能直接访问远程 `http://your-server-ip:5000` (Azure 会拒绝，因为它只认 `localhost`)。

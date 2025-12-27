@@ -17,7 +17,9 @@ venv.bak/
 .vscode/
 
 # Logs
+# Logs
 *.log
+logs/
 
 # Project specific
 refresh_token.txt

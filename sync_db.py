@@ -2,70 +2,103 @@ import json
 import os
 import psycopg2
 import sys
+import logging
 from datetime import datetime
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
 
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
 # Configuration
 ACCOUNTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "accounts.json")
+REPORT_FILE = os.path.join("logs", "sync_report.json")
 DB_URL = os.environ.get("DB_URL")
 
 if not DB_URL:
-    print("❌ Error: DB_URL not found in environment variables.")
-    sys.exit(1)
+    logger.error("❌ Error: DB_URL not found in environment variables.")
+    # 我们不直接退出了，而是生成一个错误报告，让 scheduler 知道
+    # sys.exit(1) 
+
+def ensure_logs_dir():
+    if not os.path.exists("logs"):
+        os.makedirs("logs")
 
 def load_local_accounts():
     """读取本地 accounts.json"""
     if not os.path.exists(ACCOUNTS_FILE):
-        print(f"❌ 本地文件不存在: {ACCOUNTS_FILE}")
+        logger.error(f"❌ 本地文件不存在: {ACCOUNTS_FILE}")
         return {}
     try:
         with open(ACCOUNTS_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception as e:
-        print(f"❌ 读取本地文件失败: {e}")
+        logger.error(f"❌ 读取本地文件失败: {e}")
         return {}
 
+def save_report(stats, error=None):
+    report = {
+        "timestamp": datetime.now().isoformat(),
+        "stats": stats,
+        "error": str(error) if error else None
+    }
+    try:
+        with open(REPORT_FILE, "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2, ensure_ascii=False)
+        logger.info(f"📝 同步报告已写入: {REPORT_FILE}")
+    except Exception as e:
+        logger.error(f"❌ 写入报告失败: {e}")
+
 def sync_to_db():
-    local_data = load_local_accounts()
-    if not local_data:
-        print("⚠ 没有本地数据，结束同步。")
+    ensure_logs_dir()
+    
+    stats = {
+        "inserted": 0,
+        "updated": 0,
+        "skipped": 0
+    }
+
+    if not DB_URL:
+        save_report(stats, "DB_URL not configured")
         return
 
-    print(f"🔄 开始同步 {len(local_data)} 个本地账户到数据库...")
+    local_data = load_local_accounts()
+    if not local_data:
+        logger.warning("⚠ 没有本地数据，结束同步。")
+        save_report(stats, "No local data found")
+        return
 
+    logger.info(f"🔄 开始同步 {len(local_data)} 个本地账户到数据库...")
+
+    conn = None
     try:
         conn = psycopg2.connect(DB_URL)
         cur = conn.cursor()
         
-        updated_count = 0
-        inserted_count = 0
-        skipped_count = 0
-
         for email, info in local_data.items():
             local_refresh_token = info.get("refresh_token")
             local_client_id = info.get("client_id")
             
             if not local_refresh_token or not local_client_id:
-                print(f"⚠️ 跳过不完整数据: {email}")
+                logger.warning(f"⚠️ 跳过不完整数据: {email}")
                 continue
 
             # 1. 查询数据库是否存在 (忽略大小写)
-            # 我们同时取回 email 字段，以便后续 UPDATE 时使用数据库里实际存储的大小写格式
             cur.execute("SELECT data, email FROM account_backups WHERE LOWER(email) = LOWER(%s)", (email,))
             row = cur.fetchone()
 
             if row:
                 # --- 情况 B: 数据库已存在 (增量融合) ---
                 db_data_str = row[0]
-                db_actual_email = row[1] # 数据库里存储的真实邮箱 (可能与 email 大小写不同)
+                db_actual_email = row[1]
 
                 try:
                     db_json = json.loads(db_data_str)
                 except:
-                    db_json = {} #如果数据库里原来的不是json，就初始化为空
+                    db_json = {} 
 
                 # 检查是否需要更新
                 needs_update = False
@@ -79,23 +112,19 @@ def sync_to_db():
                     needs_update = True
                 
                 if needs_update:
-                    # 执行更新 (注意 WHERE 使用 db_actual_email)
                     new_data_str = json.dumps(db_json, ensure_ascii=False)
                     cur.execute("""
                         UPDATE account_backups 
                         SET data = %s, last_modified_at = NOW() 
                         WHERE email = %s
                     """, (new_data_str, db_actual_email))
-                    print(f"✅ [更新] {db_actual_email} (匹配本地 {email})")
-                    updated_count += 1
+                    logger.info(f"✅ [更新] {db_actual_email}")
+                    stats["updated"] += 1
                 else:
-                    # 数据一致，跳过
-                    # print(f"zz [跳过] {db_actual_email} (数据一致)") 
-                    skipped_count += 1
+                    stats["skipped"] += 1
 
             else:
                 # --- 情况 A: 数据库不存在 (新增) ---
-                # 构造初始 Json (只包含我们知道的信息)
                 new_json = {
                     "refresh_token": local_refresh_token,
                     "client_id": local_client_id
@@ -106,22 +135,24 @@ def sync_to_db():
                     INSERT INTO account_backups (email, data, last_modified_at)
                     VALUES (%s, %s, NOW())
                 """, (email, new_data_str))
-                print(f"🆕 [新增] {email}")
-                inserted_count += 1
+                logger.info(f"🆕 [新增] {email}")
+                stats["inserted"] += 1
 
         conn.commit()
         cur.close()
-        conn.close()
         
-        print("-" * 50)
-        print(f"🎉 同步完成!")
-        print(f"🆕 新增: {inserted_count}")
-        print(f"✅ 更新: {updated_count}")
-        print(f"⏭️ 跳过: {skipped_count} (无变化)")
-        print("-" * 50)
+        logger.info("-" * 50)
+        logger.info(f"🎉 同步完成! 新增: {stats['inserted']}, 更新: {stats['updated']}, 跳过: {stats['skipped']}")
+        logger.info("-" * 50)
+        
+        save_report(stats)
 
     except Exception as e:
-        print(f"❌ 数据库操作失败: {e}")
+        logger.error(f"❌ 数据库操作失败: {e}")
+        save_report(stats, str(e))
+    finally:
+        if conn:
+            conn.close()
 
 if __name__ == "__main__":
     sync_to_db()

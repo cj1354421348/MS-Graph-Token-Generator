@@ -29,12 +29,6 @@ services:
       - ./accounts.json:/app/accounts.json
     env_file:
       - .env
-    # 逻辑：先刷新 Token，紧接着同步到数据库，然后休眠 7 天 (604800秒)
-    command: >
-      sh -c "while true; do 
-        echo 'Starting auto-refresh loop...';
-        python token_refresher.py;
-        python sync_db.py;
-        echo 'All done. Sleeping for 7 days...';
-        sleep 604800; 
-      done"
+    # 逻辑：使用 Python 调度器管理生命周期 (Token刷新 -> DB同步 -> 休眠7天)
+    # -u 参数禁用 Python 输出缓冲，确保日志实时显示
+    command: python -u scheduler.py
